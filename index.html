@@ -150,28 +150,60 @@
         // 1. Initial Load
         window.onload = async () => {
             try {
-                // Initialize TensorFlow Backend & Load Lightweight MobileNet Model for SPEED
-                await tf.setBackend('webgl');
-                // Use alpha 0.25 (Fastest) for mobile performance optimization
-                const modelTask = mobilenet.load({ version: 1, alpha: 0.25 });
+                // Safeguard for WebGL
+                try {
+                    await tf.setBackend('webgl');
+                } catch(e) {
+                    console.warn("WebGL not supported, falling back to default backend.");
+                }
+                
+                // LOAD MODEL WITH ERROR HANDLING (Prevents Unhandled Rejection)
+                const modelTask = mobilenet.load({ version: 1, alpha: 0.25 }).catch(err => {
+                    console.warn("AI Model load failed (Network/CORS issue):", err);
+                    return null; 
+                });
                 
                 await fetchRecursive(ROOT_FOLDER, "Root");
                 
                 net = await modelTask;
-                document.getElementById('mainLoader').classList.add('hidden');
                 
-                if (allImagesForSearch.length > 0) startBackgroundIndexing();
-                else document.getElementById('galleryContainer').innerHTML = `<div class="text-center py-20 text-slate-400 font-medium italic">ไม่พบเนื้อหาในคลังสื่อ</div>`;
+                if (!net) {
+                    showMessageBox("⚠️ โหมดค้นหาด้วย AI ไม่พร้อมใช้งานชั่วคราวเนื่องจากข้อจำกัดเครือข่าย แต่ยังคงดูรูปได้ครับ");
+                }
                 
             } catch (error) {
-                if (error.message.includes("403")) document.getElementById('setupGuide').classList.remove('hidden');
-                else console.error(error);
+                if (error.message && error.message.includes("403")) {
+                    document.getElementById('setupGuide').classList.remove('hidden');
+                } else {
+                    console.error("System Init Error:", error);
+                }
+            } finally {
+                document.getElementById('mainLoader').classList.add('hidden');
+                
+                if (allImagesForSearch.length > 0) {
+                    if (net) startBackgroundIndexing();
+                } else if (document.getElementById('setupGuide').classList.contains('hidden')) {
+                    document.getElementById('galleryContainer').innerHTML = `
+                        <div class="text-center py-20 text-slate-500 animate-in">
+                            <i data-lucide="folder-lock" class="w-16 h-16 mx-auto mb-4 opacity-40"></i>
+                            <h3 class="text-xl font-bold text-slate-700 mb-2">ไม่สามารถโหลดรูปภาพได้</h3>
+                            <p class="text-sm max-w-md mx-auto leading-relaxed">ไม่พบรูปภาพ หรือ สิทธิ์การเข้าถึงถูกจำกัด<br>โปรดตรวจสอบว่าโฟลเดอร์ใน Google Drive ได้ตั้งค่าสิทธิ์เป็น<br><b class="text-blue-600">"ทุกคนที่มีลิงก์ (Anyone with the link)"</b></p>
+                        </div>
+                    `;
+                    lucide.createIcons();
+                }
             }
         };
 
         async function fetchRecursive(folderId, folderName) {
             try {
                 const res = await fetch(`https://www.googleapis.com/drive/v3/files?q='${folderId}'+in+parents+and+trashed=false&fields=files(id,name,mimeType,webContentLink,thumbnailLink)&pageSize=1000&key=${API_KEY}`);
+                
+                if (!res.ok) {
+                    if (res.status === 403) throw new Error("403");
+                    return; 
+                }
+
                 const data = await res.json();
                 const items = data.files || [];
 
@@ -182,13 +214,12 @@
                 let cleanTitle = folderName.replace(/^Root\s*\/?\s*/, "") || "คลังภาพหลัก";
                 const currentFolderItems = [];
 
-                // ADD VIDEOS FIRST SO THEY APPEAR AT THE BEGINNING OF THE FOLDER
                 if (videoFiles.length > 0) {
                     const mappedVideos = videoFiles.map(f => ({
                         id: f.id,
                         name: f.name,
                         mimeType: f.mimeType,
-                        driveLink: `https://drive.google.com/file/d/${f.id}/view`, // Direct viewing link
+                        driveLink: `https://drive.google.com/file/d/${f.id}/view`, 
                         thumb: f.thumbnailLink ? f.thumbnailLink.replace(/=s\d+/, '=s600') : `https://via.placeholder.com/600x400?text=VIDEO`,
                         folderName: cleanTitle,
                         isVideo: true
@@ -196,16 +227,15 @@
                     currentFolderItems.push(...mappedVideos);
                 }
 
-                // ADD IMAGES AFTER VIDEOS
                 if (imageFiles.length > 0) {
                     const mappedImages = imageFiles.map(f => ({
                         id: f.id,
                         name: f.name,
                         mimeType: f.mimeType,
-                        driveLink: f.webContentLink,
+                        driveLink: f.webContentLink || `https://drive.google.com/file/d/${f.id}/view`, 
                         url: `https://lh3.googleusercontent.com/d/${f.id}=w1600`,
                         thumb: f.thumbnailLink ? f.thumbnailLink.replace(/=s\d+/, '=s400') : `https://lh3.googleusercontent.com/d/${f.id}=w400`,
-                        embedThumb: f.thumbnailLink ? f.thumbnailLink.replace(/=s\d+/, '=s224') : `https://lh3.googleusercontent.com/d/${f.id}=w224`, // Tiny thumb for super fast AI
+                        embedThumb: f.thumbnailLink ? f.thumbnailLink.replace(/=s\d+/, '=s224') : `https://lh3.googleusercontent.com/d/${f.id}=w224`,
                         folderName: cleanTitle,
                         isVideo: false
                     }));
@@ -218,9 +248,11 @@
                     renderFolderSection(cleanTitle, currentFolderItems);
                 }
 
-                // Process folders in parallel
                 await Promise.all(subFolders.map(sub => fetchRecursive(sub.id, `${folderName} / ${sub.name}`)));
-            } catch (e) { console.warn(e); }
+            } catch (e) {
+                if (e.message === "403") throw e; 
+                console.warn(e); 
+            }
         }
 
         // 2. Rendering
@@ -243,7 +275,6 @@
                 div.className = 'image-card bg-white rounded-2xl shadow-sm overflow-hidden cursor-pointer border-2 border-white hover:shadow-xl transition-all relative';
                 div.onclick = () => {
                     if (file.isVideo) {
-                        // Navigates in same tab to avoid empty popups on mobile
                         window.location.href = file.driveLink;
                     } else {
                         currentIndex = allImagesForSearch.findIndex(m => m.id === file.id);
@@ -277,11 +308,10 @@
                 let item = allImagesForSearch[i];
                 if (mediaEmbeddings.has(item.id)) continue;
                 try {
-                    const vector = await getImageEmbedding(item.embedThumb); // Using tiny thumb
+                    const vector = await getImageEmbedding(item.embedThumb); 
                     mediaEmbeddings.set(item.id, vector);
                 } catch (e) {}
                 
-                // Allow UI to breathe
                 if (i % 10 === 0) await tf.nextFrame();
             }
             isIndexing = false;
@@ -289,7 +319,13 @@
 
         async function handleVisualSearch(event) {
             const file = event.target.files[0];
-            if (!file || !net) return;
+            if (!file) return;
+            
+            if (!net) {
+                showMessageBox("⚠️ ระบบ AI ไม่พร้อมใช้งานชั่วคราว");
+                return;
+            }
+
             const reader = new FileReader();
             reader.onload = async (e) => {
                 const previewImg = document.getElementById('targetPreviewImg');
@@ -321,17 +357,16 @@
                         
                         results.push({ ...item, score: cosineSimilarity(targetVector, featureVector) });
                         
-                        // Ultra fast UI Update
                         if (i % 15 === 0) {
                             const p = Math.round((i / total) * 100);
                             document.getElementById('searchStatus').innerText = `กำลังประมวลผล... ${p}%`;
                             document.getElementById('searchProgressBar').style.width = p + '%';
-                            await tf.nextFrame(); // Non-blocking UI
+                            await tf.nextFrame();
                         }
                     }
 
                     results.sort((a, b) => b.score - a.score);
-                    const top20 = results.slice(0, 20); // Limit to Top 20 for Speed
+                    const top20 = results.slice(0, 20); 
                     const duration = ((performance.now() - startTime) / 1000).toFixed(2);
                     
                     currentDisplayList = top20;
@@ -423,6 +458,12 @@
         }
         function closeModal() { document.getElementById('imageModal').classList.replace('flex', 'hidden'); document.body.style.overflow = 'auto'; }
         function resetSearch() { window.location.reload(); }
+        function showMessageBox(msg) {
+            const box = document.createElement('div');
+            box.className = 'fixed bottom-10 left-1/2 -translate-x-1/2 bg-slate-900 text-white px-8 py-3 rounded-2xl shadow-2xl z-[200] animate-in text-sm font-medium';
+            box.innerText = msg; document.body.appendChild(box);
+            setTimeout(() => box.remove(), 4000);
+        }
     </script>
 </body>
 </html>
